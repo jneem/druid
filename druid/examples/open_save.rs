@@ -18,12 +18,15 @@ use druid::{
     LocalizedString, Target, Widget, WindowDesc,
 };
 
+use cpal::traits::HostTrait;
+
 struct Delegate;
 
 pub fn main() {
     let main_window = WindowDesc::new(ui_builder)
         .title(LocalizedString::new("open-save-demo").with_placeholder("Opening/Saving Demo"));
     let data = "Type here.".to_owned();
+    cpal::default_host().default_input_device();
     AppLauncher::with_window(main_window)
         .delegate(Delegate)
         .use_simple_logger()
