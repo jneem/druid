@@ -26,6 +26,7 @@ use crate::kurbo::{Point, Rect, Size};
 use crate::menu::Menu;
 use crate::mouse::{Cursor, MouseEvent};
 use crate::platform::window as platform;
+use crate::region::Region;
 use crate::scale::Scale;
 
 // It's possible we'll want to make this type alias at a lower level,
@@ -129,6 +130,7 @@ impl WindowHandle {
     }
 
     /// Request invalidation of the entire window contents.
+    /// FIXME: docs
     pub fn invalidate(&self) {
         self.0.invalidate()
     }
@@ -318,13 +320,15 @@ pub trait WinHandler {
     #[allow(unused_variables)]
     fn scale(&mut self, scale: Scale) {}
 
+    fn pre_paint(&mut self);
+
     /// Request the handler to paint the window contents. Return value
     /// indicates whether window is animating, i.e. whether another paint
-    /// should be scheduled for the next animation frame. `invalid_rect` is the
-    /// rectangle in [display points] that needs to be repainted.
+    /// should be scheduled for the next animation frame. `invalid` is the
+    /// region in [display points] that needs to be repainted.
     ///
     /// [display points]: struct.Scale.html
-    fn paint(&mut self, piet: &mut piet_common::Piet, invalid_rect: Rect) -> bool;
+    fn paint(&mut self, piet: &mut piet_common::Piet, invalid: &Region) -> bool;
 
     /// Called when the resources need to be rebuilt.
     ///

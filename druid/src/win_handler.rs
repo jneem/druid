@@ -21,7 +21,7 @@ use std::rc::Rc;
 
 use crate::kurbo::{Rect, Size};
 use crate::piet::Piet;
-use crate::shell::{Application, IdleToken, MouseEvent, Scale, WinHandler, WindowHandle};
+use crate::shell::{Application, IdleToken, MouseEvent, Region, Scale, WinHandler, WindowHandle};
 
 use crate::app_delegate::{AppDelegate, DelegateCtx};
 use crate::core::CommandQueue;
@@ -291,16 +291,18 @@ impl<T: Data> Inner<T> {
         }
     }
 
+    fn pre_paint(&mut self, window_id: WindowId) {
+        if let Some(win) = self.windows.get_mut(window_id) {
+            win.pre_paint(&mut self.command_queue, &self.data, &self.env);
+        }
+        self.invalidate_and_finalize();
+    }
+
     /// Returns `true` if an animation frame was requested.
     fn paint(&mut self, window_id: WindowId, piet: &mut Piet, rect: Rect) -> bool {
         if let Some(win) = self.windows.get_mut(window_id) {
             win.do_paint(piet, rect, &mut self.command_queue, &self.data, &self.env);
-            if win.wants_animation_frame() {
-                win.handle.invalidate();
-                true
-            } else {
-                false
-            }
+            win.wants_animation_frame()
         } else {
             false
         }
@@ -475,6 +477,10 @@ impl<T: Data> AppState<T> {
         self.process_commands();
         self.inner.borrow_mut().do_update();
         result
+    }
+
+    fn pre_paint_window(&mut self, window_id: WindowId) {
+        self.inner.borrow_mut().pre_paint(window_id);
     }
 
     fn paint_window(&mut self, window_id: WindowId, piet: &mut Piet, rect: Rect) -> bool {
@@ -656,8 +662,13 @@ impl<T: Data> WinHandler for DruidHandler<T> {
         self.app_state.do_window_event(event, self.window_id);
     }
 
-    fn paint(&mut self, piet: &mut Piet, rect: Rect) -> bool {
-        self.app_state.paint_window(self.window_id, piet, rect)
+    fn pre_paint(&mut self) {
+        self.app_state.pre_paint_window(self.window_id);
+    }
+
+    fn paint(&mut self, piet: &mut Piet, region: &Region) -> bool {
+        self.app_state
+            .paint_window(self.window_id, piet, region.bounding_box())
     }
 
     fn size(&mut self, size: Size) {
