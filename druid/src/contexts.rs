@@ -299,7 +299,6 @@ impl_context_method!(EventCtx<'_, '_>, UpdateCtx<'_, '_>, LifeCycleCtx<'_, '_>, 
     /// Request an animation frame.
     pub fn request_anim_frame(&mut self) {
         self.widget_state.request_anim = true;
-        self.request_paint();
     }
 
     /// Request a timer event.

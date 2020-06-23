@@ -139,6 +139,16 @@ impl<T: Data> Window<T> {
         }
         // Add all the requested timers to the window's timers map.
         self.timers.extend_drain(&mut widget_state.timers);
+
+        // If we need a new paint pass, make sure druid-shell knows it.
+        if widget_state.request_anim && self.last_anim.is_none() {
+            self.last_anim = Some(Instant::now());
+        }
+        if self.wants_animation_frame() {
+            // TODO: better API for requesting a paint pass without invalidating a rect.
+            self.handle.invalidate();
+        }
+
         // If there are any commands and they should be processed
         if process_commands && !queue.is_empty() {
             // Ask the handler to call us back on idle
@@ -299,8 +309,16 @@ impl<T: Data> Window<T> {
         }
     }
 
-    /// Do all the stuff we do in response to a paint call from the system:
-    /// layout, send an `AnimFrame` event, and then actually paint.
+    /// Get ready for painting, by doing layout and sending an `AnimFrame` event.
+    pub(crate) fn pre_paint(&mut self, queue: &mut CommandQueue, data: &T, env: &Env) {
+        // FIXME: only do AnimFrame if root has requested_anim?
+        self.lifecycle(queue, &LifeCycle::AnimFrame(0), data, env, true);
+
+        if self.root.state().needs_layout {
+            self.layout(queue, data, env);
+        }
+    }
+
     pub(crate) fn do_paint(
         &mut self,
         piet: &mut Piet,
@@ -309,13 +327,6 @@ impl<T: Data> Window<T> {
         data: &T,
         env: &Env,
     ) {
-        // FIXME: only do AnimFrame if root has requested_anim?
-        self.lifecycle(queue, &LifeCycle::AnimFrame(0), data, env, true);
-
-        if self.root.state().needs_layout {
-            self.layout(queue, data, env);
-        }
-
         piet.fill(
             invalid_rect,
             &env.get(crate::theme::WINDOW_BACKGROUND_COLOR),
