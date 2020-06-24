@@ -591,7 +591,6 @@ impl WindowState {
         let mut cur_size = self.surface_size.borrow_mut();
         let (width, height) = (next_size(width), next_size(height));
         if surface.is_none() || *cur_size != (width, height) {
-            log::debug!("resizing to ({}, {})", width, height);
             *cur_size = (width, height);
             if let Some(s) = surface.as_ref() {
                 s.finish();
@@ -610,7 +609,8 @@ impl WindowState {
         Ok(())
     }
 
-    /// Queues a call to `pre_draw` and `draw`, but without marking any region for invalidation.
+    /// Queues a call to `prepare_paint` and `paint`, but without marking any region for
+    /// invalidation.
     fn request_anim_frame(&self) {
         self.window.queue_draw();
     }
