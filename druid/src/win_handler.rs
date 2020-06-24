@@ -291,20 +291,16 @@ impl<T: Data> Inner<T> {
         }
     }
 
-    fn pre_paint(&mut self, window_id: WindowId) {
+    fn prepare_paint(&mut self, window_id: WindowId) {
         if let Some(win) = self.windows.get_mut(window_id) {
-            win.pre_paint(&mut self.command_queue, &self.data, &self.env);
+            win.prepare_paint(&mut self.command_queue, &self.data, &self.env);
         }
         self.invalidate_and_finalize();
     }
 
-    /// Returns `true` if an animation frame was requested.
-    fn paint(&mut self, window_id: WindowId, piet: &mut Piet, rect: Rect) -> bool {
+    fn paint(&mut self, window_id: WindowId, piet: &mut Piet, rect: Rect) {
         if let Some(win) = self.windows.get_mut(window_id) {
             win.do_paint(piet, rect, &mut self.command_queue, &self.data, &self.env);
-            win.wants_animation_frame()
-        } else {
-            false
         }
     }
 
@@ -479,12 +475,12 @@ impl<T: Data> AppState<T> {
         result
     }
 
-    fn pre_paint_window(&mut self, window_id: WindowId) {
-        self.inner.borrow_mut().pre_paint(window_id);
+    fn prepare_paint_window(&mut self, window_id: WindowId) {
+        self.inner.borrow_mut().prepare_paint(window_id);
     }
 
-    fn paint_window(&mut self, window_id: WindowId, piet: &mut Piet, rect: Rect) -> bool {
-        self.inner.borrow_mut().paint(window_id, piet, rect)
+    fn paint_window(&mut self, window_id: WindowId, piet: &mut Piet, rect: Rect) {
+        self.inner.borrow_mut().paint(window_id, piet, rect);
     }
 
     fn idle(&mut self, token: IdleToken) {
@@ -662,13 +658,13 @@ impl<T: Data> WinHandler for DruidHandler<T> {
         self.app_state.do_window_event(event, self.window_id);
     }
 
-    fn pre_paint(&mut self) {
-        self.app_state.pre_paint_window(self.window_id);
+    fn prepare_paint(&mut self) {
+        self.app_state.prepare_paint_window(self.window_id);
     }
 
-    fn paint(&mut self, piet: &mut Piet, region: &Region) -> bool {
+    fn paint(&mut self, piet: &mut Piet, region: &Region) {
         self.app_state
-            .paint_window(self.window_id, piet, region.bounding_box())
+            .paint_window(self.window_id, piet, region.bounding_box());
     }
 
     fn size(&mut self, size: Size) {

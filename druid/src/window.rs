@@ -145,8 +145,7 @@ impl<T: Data> Window<T> {
             self.last_anim = Some(Instant::now());
         }
         if self.wants_animation_frame() {
-            // TODO: better API for requesting a paint pass without invalidating a rect.
-            self.handle.invalidate();
+            self.handle.request_anim_frame();
         }
 
         // If there are any commands and they should be processed
@@ -310,7 +309,7 @@ impl<T: Data> Window<T> {
     }
 
     /// Get ready for painting, by doing layout and sending an `AnimFrame` event.
-    pub(crate) fn pre_paint(&mut self, queue: &mut CommandQueue, data: &T, env: &Env) {
+    pub(crate) fn prepare_paint(&mut self, queue: &mut CommandQueue, data: &T, env: &Env) {
         // FIXME: only do AnimFrame if root has requested_anim?
         self.lifecycle(queue, &LifeCycle::AnimFrame(0), data, env, true);
 
@@ -396,6 +395,10 @@ impl<T: Data> Window<T> {
                     (z_op.paint_func)(ctx);
                 });
             });
+        }
+
+        if self.wants_animation_frame() {
+            self.handle.request_anim_frame();
         }
     }
 

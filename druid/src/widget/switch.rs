@@ -170,10 +170,10 @@ impl Widget<bool> for Switch {
 
                 if self.knob_pos.x > off_pos && self.knob_pos.x < on_pos {
                     ctx.request_anim_frame();
-                    ctx.request_paint();
                 } else {
                     self.animation_in_progress = false;
                 }
+                ctx.request_paint();
             }
         }
     }
