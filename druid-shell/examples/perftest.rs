@@ -39,7 +39,7 @@ impl WinHandler for PerfTest {
         self.handle = handle.clone();
     }
 
-    fn pre_paint(&mut self) {
+    fn prepare_paint(&mut self) {
         self.handle.invalidate();
     }
 

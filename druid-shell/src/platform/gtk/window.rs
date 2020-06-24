@@ -41,7 +41,7 @@ use crate::error::Error as ShellError;
 use crate::keyboard;
 use crate::mouse::{Cursor, MouseButton, MouseButtons, MouseEvent};
 use crate::region::Region;
-use crate::scale::{Scale, ScaledArea};
+use crate::scale::{Scalable, Scale, ScaledArea};
 use crate::window::{IdleToken, Text, TimerToken, WinHandler};
 
 use super::application::Application;
@@ -118,9 +118,20 @@ pub(crate) struct WindowState {
     scale: Cell<Scale>,
     area: Cell<ScaledArea>,
     drawing_area: DrawingArea,
+    // A cairo surface for us to render to; we copy this to the drawing_area whenever necessary.
+    // This extra buffer is necessitated by DrawingArea's painting model: when our paint callback
+    // is called, we are given a cairo context that's already clipped to the invalid region. This
+    // doesn't match up with our painting model, because we need to call `prepare_paint` before we
+    // know what the invalid region is.
+    //
+    // The way we work around this is by always invalidating the entire DrawingArea whenever we
+    // need repainting; this ensures that GTK gives us an unclipped cairo context. Meanwhile, we
+    // keep track of the actual invalid region. We use that region to render onto `surface`, which
+    // we then copy onto `drawing_area`.
     surface: RefCell<Option<Surface>>,
+    // The size of `surface` in pixels. This could be bigger than `drawing_area`.
     surface_size: RefCell<(i32, i32)>,
-    // The invalid region, in dp units.
+    // The invalid region, in display points.
     invalid: RefCell<Region>,
     pub(crate) handler: RefCell<Box<dyn WinHandler>>,
     idle_queue: Arc<Mutex<Vec<IdleKind>>>,
@@ -304,31 +315,37 @@ impl WindowBuilder {
 
                 if let Ok(mut handler_borrow) = state.handler.try_borrow_mut() {
                     // Note that we aren't holding any RefCell borrows here (except for the
-                    // WinHandler itself), because pre_paint can call back into our WindowHandle
+                    // WinHandler itself), because prepare_paint can call back into our WindowHandle
                     // (most likely for invalidation).
-                    handler_borrow.pre_paint();
+                    handler_borrow.prepare_paint();
 
                     let surface = state.surface.try_borrow();
                     if let Ok(Some(surface)) = surface.as_ref().map(|s| s.as_ref()) {
                         if let Ok(mut invalid) = state.invalid.try_borrow_mut() {
                             let mut surface_context = cairo::Context::new(surface);
-                            surface_context.scale(scale.x(), scale.y());
 
+                            // Clip to the invalid region, in order that our surface doesn't get
+                            // messed up if there's any painting outside them.
+                            for rect in invalid.rects() {
+                                surface_context.rectangle(rect.x0, rect.y0, rect.width(), rect.height());
+                            }
+                            surface_context.clip();
+
+                            surface_context.scale(scale.x(), scale.y());
                             let mut piet_context = Piet::new(&mut surface_context);
-                            let anim = handler_borrow
-                                .paint(&mut piet_context, &invalid);
+                            handler_borrow.paint(&mut piet_context, &invalid);
                             if let Err(e) = piet_context.finish() {
                                 eprintln!("piet error on render: {:?}", e);
                             }
 
+                            // Copy the entire surface to the drawing area (not just the invalid
+                            // region, because there might be parts of the drawing area that were
+                            // invalidated by external forces).
                             let alloc = widget.get_allocation();
                             context.set_source_surface(&surface, 0.0, 0.0);
                             context.rectangle(alloc.x as f64, alloc.y as f64, alloc.width as f64, alloc.height as f64);
                             context.fill();
 
-                            if anim {
-                                widget.queue_draw();
-                            }
                             invalid.clear();
                         } else {
                             log::warn!("Drawing was skipped because the invalid region was borrowed");
@@ -591,8 +608,17 @@ impl WindowState {
         Ok(())
     }
 
+    /// Queues a call to `pre_draw` and `draw`, but without marking any region for invalidation.
+    fn request_anim_frame(&self) {
+        self.window.queue_draw();
+    }
+
+    /// Invalidates a rectangle, given in display points.
     fn invalidate_rect(&self, rect: Rect) {
         if let Ok(mut region) = self.invalid.try_borrow_mut() {
+            let scale = self.scale.get();
+            // We prefer to invalidate an integer number of pixels.
+            let rect = rect.to_px(scale).expand().to_dp(scale);
             region.add_rect(rect);
             self.window.queue_draw();
         } else {
@@ -633,15 +659,22 @@ impl WindowHandle {
         log::warn!("bring_to_front_and_focus not yet implemented for gtk");
     }
 
-    // Request invalidation of the entire window contents.
-    // FIXME: docs
-    pub fn invalidate(&self) {
+    /// Request a new paint, but without invalidating anything.
+    pub fn request_anim_frame(&self) {
         if let Some(state) = self.state.upgrade() {
-            state.window.queue_draw();
+            state.request_anim_frame();
         }
     }
 
-    /// Request invalidation of one rectangle, which is given relative to the drawing area.
+    /// Request invalidation of the entire window contents.
+    pub fn invalidate(&self) {
+        if let Some(state) = self.state.upgrade() {
+            self.invalidate_rect(state.area.get().size_dp().to_rect());
+        }
+    }
+
+    /// Request invalidation of one rectangle, which is given in display points relative to the
+    /// drawing area.
     pub fn invalidate_rect(&self, rect: Rect) {
         if let Some(state) = self.state.upgrade() {
             state.invalidate_rect(rect);
