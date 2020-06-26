@@ -21,12 +21,13 @@ use std::cell::{Cell, RefCell};
 use std::mem;
 use std::ptr::{null, null_mut};
 use std::rc::{Rc, Weak};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use log::{debug, error, warn};
 use winapi::ctypes::{c_int, c_void};
 use winapi::shared::dxgi::*;
 use winapi::shared::dxgi1_2::*;
+use winapi::shared::dxgi1_3::*;
 use winapi::shared::dxgiformat::*;
 use winapi::shared::dxgitype::*;
 use winapi::shared::minwindef::*;
@@ -34,7 +35,9 @@ use winapi::shared::windef::*;
 use winapi::shared::winerror::*;
 use winapi::um::d2d1::*;
 use winapi::um::errhandlingapi::GetLastError;
+use winapi::um::synchapi::WaitForSingleObjectEx;
 use winapi::um::unknwnbase::*;
+use winapi::um::winbase::INFINITE;
 use winapi::um::winnt::*;
 use winapi::um::winuser::*;
 
@@ -45,6 +48,7 @@ use crate::platform::windows::HwndRenderTarget;
 
 use crate::kurbo::{Point, Rect, Size, Vec2};
 use crate::piet::{Piet, RenderContext};
+use crate::region::Region;
 
 use super::accels::register_accel;
 use super::application::Application;
@@ -143,6 +147,7 @@ struct WindowState {
     hwnd: Cell<HWND>,
     scale: Cell<Scale>,
     area: Cell<ScaledArea>,
+    invalid: RefCell<Region>,
     has_menu: Cell<bool>,
     wndproc: Box<dyn WndProc>,
     idle_queue: Arc<Mutex<Vec<IdleKind>>>,
@@ -184,12 +189,21 @@ struct WndState {
     // Is this window the topmost window under the mouse cursor
     has_mouse_focus: bool,
     //TODO: track surrogate orphan
+
+    // In order to schedule repaints, we spawn a thread (one per window) to wait for new frames.
+    // When a new frame is available, the thread will `SendMessage` to the window. In order to
+    // avoid waking up every frame, the frame-waiting thread will also wait on the
+    // `needs_paint_wait` condvar and check the `needs_paint` mutex before waiting for new frames.
+    // In other words, the window should set `needs_paint` to `true` and signal `needs_paint_wait`
+    // whenever it expects to need repainting.
+    needs_paint: Arc<Mutex<bool>>,
+    needs_paint_wait: Arc<Condvar>,
 }
 
 /// State for DirectComposition. This is optional because it is only supported
 /// on 8.1 and up.
 struct DCompState {
-    swap_chain: *mut IDXGISwapChain1,
+    swap_chain: *mut IDXGISwapChain2,
     dcomp_device: DCompositionDevice,
     dcomp_target: DCompositionTarget,
     swapchain_visual: DCompositionVisual,
@@ -211,6 +225,9 @@ const DS_RUN_IDLE: UINT = WM_USER;
 /// send this message to request destroying the window, so that at the
 /// time it is handled, we can successfully borrow the handler.
 pub(crate) const DS_REQUEST_DESTROY: UINT = WM_USER + 1;
+
+/// Message indicating that a frame should be drawn and presented.
+const DS_PRESENT_FRAME: UINT = WM_USER + 2;
 
 impl Default for PresentStrategy {
     fn default() -> PresentStrategy {
@@ -273,17 +290,17 @@ impl WndState {
         d2d: &D2DFactory,
         dw: &DwriteFactory,
         handle: &RefCell<WindowHandle>,
-        invalid_rect: Rect,
+        invalid: &Region,
     ) {
+        self.handler.prepare_paint();
         let rt = self.render_target.as_mut().unwrap();
         rt.begin_draw();
-        let anim;
         {
             let mut piet_ctx = Piet::new(d2d, dw, rt);
             // The documentation on DXGI_PRESENT_PARAMETERS says we "must not update any
             // pixel outside of the dirty rectangles."
-            piet_ctx.clip(invalid_rect);
-            anim = self.handler.paint(&mut piet_ctx, invalid_rect);
+            piet_ctx.clip(invalid.to_bez_path());
+            self.handler.paint(&mut piet_ctx, invalid);
             if let Err(e) = piet_ctx.finish() {
                 error!("piet error on render: {:?}", e);
             }
@@ -292,12 +309,6 @@ impl WndState {
         let res = rt.end_draw();
         if let Err(e) = res {
             error!("EndDraw error: {:?}", e);
-        }
-        if anim {
-            let handle = handle.borrow().get_idle_handle().unwrap();
-            // Note: maybe add WindowHandle as arg to idle handler so we don't need this.
-            let handle2 = handle.clone();
-            handle.add_idle_callback(move |_| handle2.invalidate());
         }
     }
 
@@ -350,6 +361,11 @@ impl MyWndProc {
         self.with_window_state(|state| state.area.get())
     }
 
+    fn invalid(&self) -> Region {
+        // FIXME: avoid the clone?
+        self.with_window_state(|state| state.invalid.borrow().clone())
+    }
+
     fn set_area(&self, area: ScaledArea) {
         self.with_window_state(move |state| state.area.set(area))
     }
@@ -391,7 +407,13 @@ impl WndProc for MyWndProc {
                 }
                 if let Some(state) = self.state.borrow_mut().as_mut() {
                     let dcomp_state = unsafe {
-                        create_dcomp_state(self.present_strategy, hwnd).unwrap_or_else(|e| {
+                        create_dcomp_state(
+                            self.present_strategy,
+                            hwnd,
+                            Arc::clone(&state.needs_paint),
+                            Arc::clone(&state.needs_paint_wait),
+                        )
+                        .unwrap_or_else(|e| {
                             warn!("Creating swapchain failed, falling back to hwnd: {:?}", e);
                             None
                         })
@@ -423,18 +445,18 @@ impl WndProc for MyWndProc {
                 if let Ok(mut s) = self.state.try_borrow_mut() {
                     let mut rect: RECT = mem::zeroed();
                     GetUpdateRect(hwnd, &mut rect, FALSE);
+                    // TODO: mark this as invalid, but don't render yet
                     let s = s.as_mut().unwrap();
                     if s.render_target.is_none() {
                         let rt = paint::create_render_target(&self.d2d_factory, hwnd);
                         s.render_target = rt.ok();
                     }
                     s.handler.rebuild_resources();
-                    let rect_dp = self.scale().to_dp(&util::recti_to_rect(rect));
                     s.render(
                         &self.d2d_factory,
                         &self.dwrite_factory,
                         &self.handle,
-                        rect_dp,
+                        &self.invalid(),
                     );
                     if let Some(ref mut ds) = s.dcomp_state {
                         let params = DXGI_PRESENT_PARAMETERS {
@@ -467,7 +489,7 @@ impl WndProc for MyWndProc {
                                 &self.d2d_factory,
                                 &self.dwrite_factory,
                                 &self.handle,
-                                rect_dp,
+                                &rect_dp.into(),
                             );
                         }
 
@@ -502,7 +524,7 @@ impl WndProc for MyWndProc {
                                 &self.d2d_factory,
                                 &self.dwrite_factory,
                                 &self.handle,
-                                area.size_dp().to_rect(),
+                                &area.size_dp().to_rect().into(),
                             );
                             (*s.dcomp_state.as_ref().unwrap().swap_chain).Present(0, 0);
                         } else {
@@ -570,7 +592,7 @@ impl WndProc for MyWndProc {
                                 &self.d2d_factory,
                                 &self.dwrite_factory,
                                 &self.handle,
-                                size_dp.to_rect(),
+                                &size_dp.to_rect().into(),
                             );
                             if let Some(ref mut dcomp_state) = s.dcomp_state {
                                 (*dcomp_state.swap_chain).Present(0, 0);
@@ -874,6 +896,10 @@ impl WndProc for MyWndProc {
                     None
                 }
             }
+            DS_PRESENT_FRAME => {
+                dbg!("present frame!");
+                Some(0)
+            }
             _ => None,
         }
     }
@@ -963,6 +989,7 @@ impl WindowBuilder {
                 hwnd: Cell::new(0 as HWND),
                 scale: Cell::new(scale),
                 area: Cell::new(area),
+                invalid: RefCell::new(Region::EMPTY),
                 has_menu: Cell::new(has_menu),
                 wndproc: Box::new(wndproc),
                 idle_queue: Default::default(),
@@ -974,6 +1001,8 @@ impl WindowBuilder {
                 state: Rc::downgrade(&win),
             };
 
+            let needs_paint = Arc::new(Mutex::new(false));
+            let needs_paint_wait = Arc::new(Condvar::new());
             let state = WndState {
                 handler: self.handler.unwrap(),
                 render_target: None,
@@ -982,6 +1011,8 @@ impl WindowBuilder {
                 keyboard_state: KeyboardState::new(),
                 captured_mouse_buttons: MouseButtons::new(),
                 has_mouse_focus: false,
+                needs_paint,
+                needs_paint_wait,
             };
             win.wndproc.connect(&handle, state);
 
@@ -1057,9 +1088,42 @@ unsafe fn choose_adapter(factory: *mut IDXGIFactory2) -> *mut IDXGIAdapter {
     best_adapter
 }
 
+// We package this in a struct so that we can Send it. TODO: is this ok?
+struct WaitLoop {
+    hwnd: HWND,
+    vsync_wait: HANDLE,
+    needs_paint: Arc<Mutex<bool>>,
+    needs_paint_wait: Arc<Condvar>,
+}
+
+unsafe impl Send for WaitLoop {}
+
+fn frame_wait_loop(data: WaitLoop) {
+    loop {
+        let mut needs_paint = data.needs_paint.lock().unwrap();
+        while !*needs_paint {
+            needs_paint = data.needs_paint_wait.wait(needs_paint).unwrap();
+        }
+        let res = unsafe { WaitForSingleObjectEx(data.vsync_wait, INFINITE, FALSE) };
+        if res != 0 {
+            // TODO: better diagnostic
+            log::warn!("failed to wait for single object: {}", res);
+            break;
+        }
+        // Note that this is synchronous: we get back control after the window has finished
+        // processing the message. In particular, it has had a chance to set `needs_paint`
+        // to the appropriate value for our next trip through the loop.
+        unsafe {
+            SendMessageW(data.hwnd, DS_PRESENT_FRAME, 0, 0);
+        }
+    }
+}
+
 unsafe fn create_dcomp_state(
     present_strategy: PresentStrategy,
     hwnd: HWND,
+    needs_paint: Arc<Mutex<bool>>,
+    needs_paint_wait: Arc<Condvar>,
 ) -> Result<Option<DCompState>, Error> {
     if present_strategy == PresentStrategy::Hwnd {
         return Ok(None);
@@ -1101,7 +1165,9 @@ unsafe fn create_dcomp_state(
             Scaling: DXGI_SCALING_STRETCH,
             SwapEffect: swap_effect,
             AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-            Flags: 0,
+            // FIXME: this isn't supported until 8.1. Are we allowed to leave it here anyway?
+            // (Without expected it to have any effect)
+            Flags: DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
         };
         let mut swap_chain: *mut IDXGISwapChain1 = null_mut();
         let res = (*factory).CreateSwapChainForComposition(
@@ -1110,7 +1176,18 @@ unsafe fn create_dcomp_state(
             null_mut(),
             &mut swap_chain,
         );
+        // FIXME: is this right? I can't find docs on how to create a IDXGISwapChain2...
+        let swap_chain = swap_chain as *mut IDXGISwapChain2;
         debug!("swap chain res = 0x{:x}, pointer = {:?}", res, swap_chain);
+
+        let vsync_wait = (*swap_chain).GetFrameLatencyWaitableObject();
+        let wait_loop_data = WaitLoop {
+            hwnd,
+            vsync_wait,
+            needs_paint,
+            needs_paint_wait,
+        };
+        std::thread::spawn(move || frame_wait_loop(wait_loop_data));
 
         let mut swapchain_visual = dcomp_device.create_visual()?;
         swapchain_visual.set_content_raw(swap_chain as *mut IUnknown)?;
@@ -1234,6 +1311,10 @@ impl WindowHandle {
     pub fn bring_to_front_and_focus(&self) {
         //FIXME: implementation goes here
         log::warn!("bring_to_front_and_focus not yet implemented on windows");
+    }
+
+    pub fn request_anim_frame(&self) {
+        todo!()
     }
 
     pub fn invalidate(&self) {

@@ -1,4 +1,4 @@
-use kurbo::{Rect, Vec2};
+use kurbo::{BezPath, Rect, Shape, Vec2};
 
 /// A union of rectangles, useful for describing an area that needs to be repainted.
 #[derive(Clone, Debug)]
@@ -42,6 +42,18 @@ impl Region {
                 .fold(self.rects[0], |r, s| r.union(*s))
         }
     }
+
+    /// Converts into a Bezier path. Note that this just gives the concatenation of the rectangle
+    /// paths, which is not the smartest possible thing. Also, it's not the right answer for an
+    /// even/odd fill rule.
+    pub fn to_bez_path(&self) -> BezPath {
+        let mut ret = BezPath::new();
+        for rect in self.rects() {
+            // Rect ignores the tolerance.
+            ret.extend(rect.to_bez_path(0.0));
+        }
+        ret
+    }
 }
 
 impl std::ops::AddAssign<Vec2> for Region {
@@ -49,5 +61,11 @@ impl std::ops::AddAssign<Vec2> for Region {
         for r in &mut self.rects {
             *r = *r + rhs;
         }
+    }
+}
+
+impl From<Rect> for Region {
+    fn from(rect: Rect) -> Region {
+        Region { rects: vec![rect] }
     }
 }
