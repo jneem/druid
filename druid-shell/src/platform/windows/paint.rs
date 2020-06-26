@@ -25,6 +25,7 @@ use std::ptr::null_mut;
 use winapi::ctypes::c_void;
 use winapi::shared::dxgi::*;
 use winapi::shared::dxgi1_2::*;
+use winapi::shared::dxgi1_3::*;
 use winapi::shared::dxgiformat::*;
 use winapi::shared::windef::*;
 use winapi::shared::winerror::*;
@@ -68,7 +69,7 @@ pub(crate) unsafe fn create_render_target(
 /// TODO: probably want to create a DeviceContext, it's more flexible.
 pub(crate) unsafe fn create_render_target_dxgi(
     d2d_factory: &D2DFactory,
-    swap_chain: *mut IDXGISwapChain1,
+    swap_chain: *mut IDXGISwapChain2,
     scale: Scale,
 ) -> Result<DxgiSurfaceRenderTarget, Error> {
     let mut buffer: *mut IDXGISurface = null_mut();
