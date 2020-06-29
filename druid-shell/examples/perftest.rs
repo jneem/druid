@@ -43,7 +43,7 @@ impl WinHandler for PerfTest {
         self.handle.invalidate();
     }
 
-    fn paint(&mut self, piet: &mut Piet, _: &Region) -> bool {
+    fn paint(&mut self, piet: &mut Piet, _: &Region) {
         let rect = self.size.to_rect();
         piet.fill(rect, &BG_COLOR);
 
@@ -107,8 +107,7 @@ impl WinHandler for PerfTest {
             let y = y0 + (i as f64) * dy;
             piet.draw_text(&layout, (x0, y), &FG_COLOR);
         }
-
-        true
+        self.handle.request_anim_frame();
     }
 
     fn command(&mut self, id: u32) {
