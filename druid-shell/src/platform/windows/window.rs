@@ -21,13 +21,12 @@ use std::cell::{Cell, RefCell};
 use std::mem;
 use std::ptr::{null, null_mut};
 use std::rc::{Rc, Weak};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 
 use log::{debug, error, warn};
 use winapi::ctypes::{c_int, c_void};
 use winapi::shared::dxgi::*;
 use winapi::shared::dxgi1_2::*;
-use winapi::shared::dxgi1_3::*;
 use winapi::shared::dxgiformat::*;
 use winapi::shared::dxgitype::*;
 use winapi::shared::minwindef::*;
@@ -35,9 +34,7 @@ use winapi::shared::windef::*;
 use winapi::shared::winerror::*;
 use winapi::um::d2d1::*;
 use winapi::um::errhandlingapi::GetLastError;
-use winapi::um::synchapi::WaitForSingleObjectEx;
 use winapi::um::unknwnbase::*;
-use winapi::um::winbase::INFINITE;
 use winapi::um::winnt::*;
 use winapi::um::winuser::*;
 
@@ -48,7 +45,6 @@ use crate::platform::windows::HwndRenderTarget;
 
 use crate::kurbo::{Point, Rect, Size, Vec2};
 use crate::piet::{Piet, RenderContext};
-use crate::region::Region;
 
 use super::accels::register_accel;
 use super::application::Application;
@@ -66,6 +62,7 @@ use crate::dialog::{FileDialogOptions, FileDialogType, FileInfo};
 use crate::error::Error as ShellError;
 use crate::keyboard::{KbKey, KeyState};
 use crate::mouse::{Cursor, MouseButton, MouseButtons, MouseEvent};
+use crate::region::Region;
 use crate::scale::{Scale, ScaledArea};
 use crate::window::{IdleToken, Text, TimerToken, WinHandler};
 
@@ -189,21 +186,12 @@ struct WndState {
     // Is this window the topmost window under the mouse cursor
     has_mouse_focus: bool,
     //TODO: track surrogate orphan
-
-    // In order to schedule repaints, we spawn a thread (one per window) to wait for new frames.
-    // When a new frame is available, the thread will `SendMessage` to the window. In order to
-    // avoid waking up every frame, the frame-waiting thread will also wait on the
-    // `needs_paint_wait` condvar and check the `needs_paint` mutex before waiting for new frames.
-    // In other words, the window should set `needs_paint` to `true` and signal `needs_paint_wait`
-    // whenever it expects to need repainting.
-    needs_paint: Arc<Mutex<bool>>,
-    needs_paint_wait: Arc<Condvar>,
 }
 
 /// State for DirectComposition. This is optional because it is only supported
 /// on 8.1 and up.
 struct DCompState {
-    swap_chain: *mut IDXGISwapChain2,
+    swap_chain: *mut IDXGISwapChain1,
     dcomp_device: DCompositionDevice,
     dcomp_target: DCompositionTarget,
     swapchain_visual: DCompositionVisual,
@@ -225,9 +213,6 @@ const DS_RUN_IDLE: UINT = WM_USER;
 /// send this message to request destroying the window, so that at the
 /// time it is handled, we can successfully borrow the handler.
 pub(crate) const DS_REQUEST_DESTROY: UINT = WM_USER + 1;
-
-/// Message indicating that a frame should be drawn and presented.
-const DS_PRESENT_FRAME: UINT = WM_USER + 2;
 
 impl Default for PresentStrategy {
     fn default() -> PresentStrategy {
@@ -289,10 +274,8 @@ impl WndState {
         &mut self,
         d2d: &D2DFactory,
         dw: &DwriteFactory,
-        handle: &RefCell<WindowHandle>,
         invalid: &Region,
     ) {
-        self.handler.prepare_paint();
         let rt = self.render_target.as_mut().unwrap();
         rt.begin_draw();
         {
@@ -362,8 +345,16 @@ impl MyWndProc {
     }
 
     fn invalid(&self) -> Region {
-        // FIXME: avoid the clone?
+        // TODO: unnecessary clone
         self.with_window_state(|state| state.invalid.borrow().clone())
+    }
+
+    fn invalidate_rect(&self, rect: Rect) {
+        self.with_window_state(|state| state.invalid.borrow_mut().add_rect(rect));
+    }
+
+    fn clear_invalid(&self) {
+        self.with_window_state(|state| state.invalid.borrow_mut().clear());
     }
 
     fn set_area(&self, area: ScaledArea) {
@@ -407,13 +398,7 @@ impl WndProc for MyWndProc {
                 }
                 if let Some(state) = self.state.borrow_mut().as_mut() {
                     let dcomp_state = unsafe {
-                        create_dcomp_state(
-                            self.present_strategy,
-                            hwnd,
-                            Arc::clone(&state.needs_paint),
-                            Arc::clone(&state.needs_paint_wait),
-                        )
-                        .unwrap_or_else(|e| {
+                        create_dcomp_state(self.present_strategy, hwnd).unwrap_or_else(|e| {
                             warn!("Creating swapchain failed, falling back to hwnd: {:?}", e);
                             None
                         })
@@ -443,10 +428,21 @@ impl WndProc for MyWndProc {
             }
             WM_PAINT => unsafe {
                 if let Ok(mut s) = self.state.try_borrow_mut() {
-                    let mut rect: RECT = mem::zeroed();
-                    GetUpdateRect(hwnd, &mut rect, FALSE);
-                    // TODO: mark this as invalid, but don't render yet
                     let s = s.as_mut().unwrap();
+                    // We call prepare_paint before GetUpdateRect, so that anything invalidated during
+                    // prepare_paint will be reflected in GetUpdateRect.
+                    s.handler.prepare_paint();
+
+                    let mut rect: RECT = mem::zeroed();
+                    // TODO: use GetUpdateRgn for more conservative invalidation
+                    GetUpdateRect(hwnd, &mut rect, FALSE);
+                    ValidateRect(hwnd, null_mut());
+                    let rect_dp = self.scale().to_dp(&util::recti_to_rect(rect));
+                    if rect_dp.area() != 0.0 {
+                        self.invalidate_rect(rect_dp);
+                    }
+                    let invalid = self.invalid();
+                    if !invalid.rects().is_empty() {
                     if s.render_target.is_none() {
                         let rt = paint::create_render_target(&self.d2d_factory, hwnd);
                         s.render_target = rt.ok();
@@ -455,13 +451,13 @@ impl WndProc for MyWndProc {
                     s.render(
                         &self.d2d_factory,
                         &self.dwrite_factory,
-                        &self.handle,
-                        &self.invalid(),
+                        &invalid,
                     );
                     if let Some(ref mut ds) = s.dcomp_state {
+                        let mut dirty_rects = util::region_to_rectis(&self.invalid(), self.scale());
                         let params = DXGI_PRESENT_PARAMETERS {
-                            DirtyRectsCount: 1,
-                            pDirtyRects: &mut rect,
+                            DirtyRectsCount: dirty_rects.len() as u32,
+                            pDirtyRects: dirty_rects.as_mut_ptr(),
                             pScrollRect: null_mut(),
                             pScrollOffset: null_mut(),
                         };
@@ -470,7 +466,8 @@ impl WndProc for MyWndProc {
                             let _ = ds.dcomp_device.commit();
                         }
                     }
-                    ValidateRect(hwnd, null_mut());
+                    self.clear_invalid();
+                }
                 } else {
                     self.log_dropped_msg(hwnd, msg, wparam, lparam);
                 }
@@ -479,6 +476,7 @@ impl WndProc for MyWndProc {
             WM_ENTERSIZEMOVE => unsafe {
                 if let Ok(mut s) = self.state.try_borrow_mut() {
                     let s = s.as_mut().unwrap();
+                    s.handler.prepare_paint();
                     if s.dcomp_state.is_some() {
                         let rt = paint::create_render_target(&self.d2d_factory, hwnd);
                         s.render_target = rt.ok();
@@ -488,9 +486,9 @@ impl WndProc for MyWndProc {
                             s.render(
                                 &self.d2d_factory,
                                 &self.dwrite_factory,
-                                &self.handle,
                                 &rect_dp.into(),
                             );
+                            self.clear_invalid();
                         }
 
                         if let Some(ref mut ds) = s.dcomp_state {
@@ -507,6 +505,7 @@ impl WndProc for MyWndProc {
             WM_EXITSIZEMOVE => unsafe {
                 if let Ok(mut s) = self.state.try_borrow_mut() {
                     let s = s.as_mut().unwrap();
+                    s.handler.prepare_paint();
                     if s.dcomp_state.is_some() {
                         let area = self.area();
                         let size_px = area.size_px();
@@ -523,9 +522,9 @@ impl WndProc for MyWndProc {
                             s.render(
                                 &self.d2d_factory,
                                 &self.dwrite_factory,
-                                &self.handle,
                                 &area.size_dp().to_rect().into(),
                             );
+                            self.clear_invalid();
                             (*s.dcomp_state.as_ref().unwrap().swap_chain).Present(0, 0);
                         } else {
                             error!("ResizeBuffers failed: 0x{:x}", res);
@@ -591,7 +590,6 @@ impl WndProc for MyWndProc {
                             s.render(
                                 &self.d2d_factory,
                                 &self.dwrite_factory,
-                                &self.handle,
                                 &size_dp.to_rect().into(),
                             );
                             if let Some(ref mut dcomp_state) = s.dcomp_state {
@@ -896,10 +894,6 @@ impl WndProc for MyWndProc {
                     None
                 }
             }
-            DS_PRESENT_FRAME => {
-                dbg!("present frame!");
-                Some(0)
-            }
             _ => None,
         }
     }
@@ -1001,8 +995,6 @@ impl WindowBuilder {
                 state: Rc::downgrade(&win),
             };
 
-            let needs_paint = Arc::new(Mutex::new(false));
-            let needs_paint_wait = Arc::new(Condvar::new());
             let state = WndState {
                 handler: self.handler.unwrap(),
                 render_target: None,
@@ -1011,8 +1003,6 @@ impl WindowBuilder {
                 keyboard_state: KeyboardState::new(),
                 captured_mouse_buttons: MouseButtons::new(),
                 has_mouse_focus: false,
-                needs_paint,
-                needs_paint_wait,
             };
             win.wndproc.connect(&handle, state);
 
@@ -1088,42 +1078,9 @@ unsafe fn choose_adapter(factory: *mut IDXGIFactory2) -> *mut IDXGIAdapter {
     best_adapter
 }
 
-// We package this in a struct so that we can Send it. TODO: is this ok?
-struct WaitLoop {
-    hwnd: HWND,
-    vsync_wait: HANDLE,
-    needs_paint: Arc<Mutex<bool>>,
-    needs_paint_wait: Arc<Condvar>,
-}
-
-unsafe impl Send for WaitLoop {}
-
-fn frame_wait_loop(data: WaitLoop) {
-    loop {
-        let mut needs_paint = data.needs_paint.lock().unwrap();
-        while !*needs_paint {
-            needs_paint = data.needs_paint_wait.wait(needs_paint).unwrap();
-        }
-        let res = unsafe { WaitForSingleObjectEx(data.vsync_wait, INFINITE, FALSE) };
-        if res != 0 {
-            // TODO: better diagnostic
-            log::warn!("failed to wait for single object: {}", res);
-            break;
-        }
-        // Note that this is synchronous: we get back control after the window has finished
-        // processing the message. In particular, it has had a chance to set `needs_paint`
-        // to the appropriate value for our next trip through the loop.
-        unsafe {
-            SendMessageW(data.hwnd, DS_PRESENT_FRAME, 0, 0);
-        }
-    }
-}
-
 unsafe fn create_dcomp_state(
     present_strategy: PresentStrategy,
     hwnd: HWND,
-    needs_paint: Arc<Mutex<bool>>,
-    needs_paint_wait: Arc<Condvar>,
 ) -> Result<Option<DCompState>, Error> {
     if present_strategy == PresentStrategy::Hwnd {
         return Ok(None);
@@ -1165,9 +1122,7 @@ unsafe fn create_dcomp_state(
             Scaling: DXGI_SCALING_STRETCH,
             SwapEffect: swap_effect,
             AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-            // FIXME: this isn't supported until 8.1. Are we allowed to leave it here anyway?
-            // (Without expected it to have any effect)
-            Flags: DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+            Flags: 0,
         };
         let mut swap_chain: *mut IDXGISwapChain1 = null_mut();
         let res = (*factory).CreateSwapChainForComposition(
@@ -1176,18 +1131,7 @@ unsafe fn create_dcomp_state(
             null_mut(),
             &mut swap_chain,
         );
-        // FIXME: is this right? I can't find docs on how to create a IDXGISwapChain2...
-        let swap_chain = swap_chain as *mut IDXGISwapChain2;
         debug!("swap chain res = 0x{:x}, pointer = {:?}", res, swap_chain);
-
-        let vsync_wait = (*swap_chain).GetFrameLatencyWaitableObject();
-        let wait_loop_data = WaitLoop {
-            hwnd,
-            vsync_wait,
-            needs_paint,
-            needs_paint_wait,
-        };
-        std::thread::spawn(move || frame_wait_loop(wait_loop_data));
 
         let mut swapchain_visual = dcomp_device.create_visual()?;
         swapchain_visual.set_content_raw(swap_chain as *mut IUnknown)?;
@@ -1314,36 +1258,32 @@ impl WindowHandle {
     }
 
     pub fn request_anim_frame(&self) {
-        todo!()
+        if let Some(w) = self.state.upgrade() {
+            let hwnd = w.hwnd.get();
+            unsafe {
+                // With the RDW_INTERNALPAINT flag, RedrawWindow causes a WM_PAINT message, but without
+                // invalidating anything. We do this because we won't know the final invalidated region
+                // until after calling prepare_paint.
+                if RedrawWindow(hwnd, null(), null_mut(), RDW_INTERNALPAINT) == 0 {
+                    log::warn!("RedrawWindow failed: {}", Error::Hr(HRESULT_FROM_WIN32(GetLastError())));
+                }
+            }
+        }
     }
 
     pub fn invalidate(&self) {
         if let Some(w) = self.state.upgrade() {
-            let hwnd = w.hwnd.get();
-            unsafe {
-                if InvalidateRect(hwnd, null(), FALSE) == FALSE {
-                    log::warn!(
-                        "InvalidateRect failed: {}",
-                        Error::Hr(HRESULT_FROM_WIN32(GetLastError()))
-                    );
-                }
-            }
+            w.invalid.borrow_mut().set_rect(w.area.get().size_dp().to_rect());
         }
+        self.request_anim_frame();
     }
 
     pub fn invalidate_rect(&self, rect: Rect) {
         if let Some(w) = self.state.upgrade() {
-            let rect = util::rect_to_recti(w.scale.get().to_px(&rect).expand());
-            let hwnd = w.hwnd.get();
-            unsafe {
-                if InvalidateRect(hwnd, &rect, FALSE) == FALSE {
-                    log::warn!(
-                        "InvalidateRect failed: {}",
-                        Error::Hr(HRESULT_FROM_WIN32(GetLastError()))
-                    );
-                }
-            }
+            // TODO: round up
+            w.invalid.borrow_mut().add_rect(rect);
         }
+        self.request_anim_frame();
     }
 
     /// Set the title for this menu.
@@ -1563,17 +1503,6 @@ impl IdleHandle {
             }
         }
         queue.push(IdleKind::Token(token));
-    }
-
-    fn invalidate(&self) {
-        unsafe {
-            if InvalidateRect(self.hwnd, null(), FALSE) == FALSE {
-                log::warn!(
-                    "InvalidateRect failed: {}",
-                    Error::Hr(HRESULT_FROM_WIN32(GetLastError()))
-                );
-            }
-        }
     }
 }
 
