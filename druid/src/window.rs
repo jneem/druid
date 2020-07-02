@@ -22,7 +22,7 @@ use instant::Instant;
 
 use crate::kurbo::{Point, Rect, Size};
 use crate::piet::{Piet, RenderContext};
-use crate::shell::{Counter, Cursor, WindowHandle};
+use crate::shell::{Counter, Cursor, Region, WindowHandle};
 
 use crate::contexts::ContextState;
 use crate::core::{CommandQueue, FocusChange, WidgetState};
@@ -301,9 +301,8 @@ impl<T: Data> Window<T> {
         if self.root.state().needs_layout {
             self.handle.invalidate();
         } else {
-            let invalid = &self.root.state().invalid;
-            if !invalid.is_empty() {
-                self.handle.invalidate_rect(invalid.to_rect());
+            for rect in self.root.state().invalid.rects() {
+                self.handle.invalidate_rect(*rect);
             }
         }
     }
@@ -321,16 +320,16 @@ impl<T: Data> Window<T> {
     pub(crate) fn do_paint(
         &mut self,
         piet: &mut Piet,
-        invalid_rect: Rect,
+        invalid: &Region,
         queue: &mut CommandQueue,
         data: &T,
         env: &Env,
     ) {
         piet.fill(
-            invalid_rect,
+            invalid.bounding_box(),
             &env.get(crate::theme::WINDOW_BACKGROUND_COLOR),
         );
-        self.paint(piet, invalid_rect, queue, data, env);
+        self.paint(piet, invalid, queue, data, env);
     }
 
     fn layout(&mut self, queue: &mut CommandQueue, data: &T, env: &Env) {
@@ -362,7 +361,7 @@ impl<T: Data> Window<T> {
     fn paint(
         &mut self,
         piet: &mut Piet,
-        invalid_rect: Rect,
+        invalid: &Region,
         queue: &mut CommandQueue,
         data: &T,
         env: &Env,
@@ -380,16 +379,16 @@ impl<T: Data> Window<T> {
             state: &mut state,
             widget_state: &widget_state,
             z_ops: Vec::new(),
-            region: invalid_rect.into(),
+            region: invalid.clone(),
             depth: 0,
         };
 
-        ctx.with_child_ctx(invalid_rect, |ctx| root.paint_raw(ctx, data, env));
+        ctx.with_child_ctx(invalid.clone(), |ctx| root.paint_raw(ctx, data, env));
         let mut z_ops = mem::take(&mut ctx.z_ops);
         z_ops.sort_by_key(|k| k.z_index);
 
         for z_op in z_ops.into_iter() {
-            ctx.with_child_ctx(invalid_rect, |ctx| {
+            ctx.with_child_ctx(invalid.clone(), |ctx| {
                 ctx.with_save(|ctx| {
                     ctx.render_ctx.transform(z_op.transform);
                     (z_op.paint_func)(ctx);

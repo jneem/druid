@@ -298,9 +298,15 @@ impl<T: Data> Inner<T> {
         self.invalidate_and_finalize();
     }
 
-    fn paint(&mut self, window_id: WindowId, piet: &mut Piet, rect: Rect) {
+    fn paint(&mut self, window_id: WindowId, piet: &mut Piet, invalid: &Region) {
         if let Some(win) = self.windows.get_mut(window_id) {
-            win.do_paint(piet, rect, &mut self.command_queue, &self.data, &self.env);
+            win.do_paint(
+                piet,
+                invalid,
+                &mut self.command_queue,
+                &self.data,
+                &self.env,
+            );
         }
     }
 
@@ -479,8 +485,8 @@ impl<T: Data> AppState<T> {
         self.inner.borrow_mut().prepare_paint(window_id);
     }
 
-    fn paint_window(&mut self, window_id: WindowId, piet: &mut Piet, rect: Rect) {
-        self.inner.borrow_mut().paint(window_id, piet, rect);
+    fn paint_window(&mut self, window_id: WindowId, piet: &mut Piet, invalid: &Region) {
+        self.inner.borrow_mut().paint(window_id, piet, invalid);
     }
 
     fn idle(&mut self, token: IdleToken) {
@@ -663,8 +669,7 @@ impl<T: Data> WinHandler for DruidHandler<T> {
     }
 
     fn paint(&mut self, piet: &mut Piet, region: &Region) {
-        self.app_state
-            .paint_window(self.window_id, piet, region.bounding_box());
+        self.app_state.paint_window(self.window_id, piet, region);
     }
 
     fn size(&mut self, size: Size) {
