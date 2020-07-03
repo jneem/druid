@@ -270,12 +270,7 @@ impl WndState {
     }
 
     // Renders but does not present.
-    fn render(
-        &mut self,
-        d2d: &D2DFactory,
-        dw: &DwriteFactory,
-        invalid: &Region,
-    ) {
+    fn render(&mut self, d2d: &D2DFactory, dw: &DwriteFactory, invalid: &Region) {
         let rt = self.render_target.as_mut().unwrap();
         rt.begin_draw();
         {
@@ -344,9 +339,11 @@ impl MyWndProc {
         self.with_window_state(|state| state.area.get())
     }
 
-    fn invalid(&self) -> Region {
-        // TODO: unnecessary clone
-        self.with_window_state(|state| state.invalid.borrow().clone())
+    /// Takes the invalid region and returns it, replacing it with the empty region.
+    fn take_invalid(&self) -> Region {
+        self.with_window_state(|state| {
+            std::mem::replace(&mut *state.invalid.borrow_mut(), Region::EMPTY)
+        })
     }
 
     fn invalidate_rect(&self, rect: Rect) {
@@ -441,33 +438,28 @@ impl WndProc for MyWndProc {
                     if rect_dp.area() != 0.0 {
                         self.invalidate_rect(rect_dp);
                     }
-                    let invalid = self.invalid();
+                    let invalid = self.take_invalid();
                     if !invalid.rects().is_empty() {
-                    if s.render_target.is_none() {
-                        let rt = paint::create_render_target(&self.d2d_factory, hwnd);
-                        s.render_target = rt.ok();
-                    }
-                    s.handler.rebuild_resources();
-                    s.render(
-                        &self.d2d_factory,
-                        &self.dwrite_factory,
-                        &invalid,
-                    );
-                    if let Some(ref mut ds) = s.dcomp_state {
-                        let mut dirty_rects = util::region_to_rectis(&self.invalid(), self.scale());
-                        let params = DXGI_PRESENT_PARAMETERS {
-                            DirtyRectsCount: dirty_rects.len() as u32,
-                            pDirtyRects: dirty_rects.as_mut_ptr(),
-                            pScrollRect: null_mut(),
-                            pScrollOffset: null_mut(),
-                        };
-                        if !ds.sizing {
-                            (*ds.swap_chain).Present1(1, 0, &params);
-                            let _ = ds.dcomp_device.commit();
+                        if s.render_target.is_none() {
+                            let rt = paint::create_render_target(&self.d2d_factory, hwnd);
+                            s.render_target = rt.ok();
+                        }
+                        s.handler.rebuild_resources();
+                        s.render(&self.d2d_factory, &self.dwrite_factory, &invalid);
+                        if let Some(ref mut ds) = s.dcomp_state {
+                            let mut dirty_rects = util::region_to_rectis(&invalid, self.scale());
+                            let params = DXGI_PRESENT_PARAMETERS {
+                                DirtyRectsCount: dirty_rects.len() as u32,
+                                pDirtyRects: dirty_rects.as_mut_ptr(),
+                                pScrollRect: null_mut(),
+                                pScrollOffset: null_mut(),
+                            };
+                            if !ds.sizing {
+                                (*ds.swap_chain).Present1(1, 0, &params);
+                                let _ = ds.dcomp_device.commit();
+                            }
                         }
                     }
-                    self.clear_invalid();
-                }
                 } else {
                     self.log_dropped_msg(hwnd, msg, wparam, lparam);
                 }
@@ -483,11 +475,7 @@ impl WndProc for MyWndProc {
                         {
                             let rect_dp = self.area().size_dp().to_rect();
                             s.handler.rebuild_resources();
-                            s.render(
-                                &self.d2d_factory,
-                                &self.dwrite_factory,
-                                &rect_dp.into(),
-                            );
+                            s.render(&self.d2d_factory, &self.dwrite_factory, &rect_dp.into());
                             self.clear_invalid();
                         }
 
@@ -1265,7 +1253,10 @@ impl WindowHandle {
                 // invalidating anything. We do this because we won't know the final invalidated region
                 // until after calling prepare_paint.
                 if RedrawWindow(hwnd, null(), null_mut(), RDW_INTERNALPAINT) == 0 {
-                    log::warn!("RedrawWindow failed: {}", Error::Hr(HRESULT_FROM_WIN32(GetLastError())));
+                    log::warn!(
+                        "RedrawWindow failed: {}",
+                        Error::Hr(HRESULT_FROM_WIN32(GetLastError()))
+                    );
                 }
             }
         }
@@ -1273,7 +1264,9 @@ impl WindowHandle {
 
     pub fn invalidate(&self) {
         if let Some(w) = self.state.upgrade() {
-            w.invalid.borrow_mut().set_rect(w.area.get().size_dp().to_rect());
+            w.invalid
+                .borrow_mut()
+                .set_rect(w.area.get().size_dp().to_rect());
         }
         self.request_anim_frame();
     }

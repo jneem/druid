@@ -913,7 +913,7 @@ impl WidgetState {
     ///
     /// This method is idempotent and can be called multiple times.
     fn merge_up(&mut self, child_state: &mut WidgetState) {
-        let mut child_region = child_state.invalid.clone();
+        let mut child_region = std::mem::replace(&mut child_state.invalid, Region::EMPTY);
         child_region += child_state.layout_rect().origin().to_vec2() - child_state.viewport_offset;
         let clip = self
             .layout_rect()
