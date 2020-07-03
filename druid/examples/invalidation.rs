@@ -71,6 +71,15 @@ impl Widget<Vector<Circle>> for CircleView {
                     pos: ev.pos,
                     time: Instant::now(),
                 });
+            } else if ev.mods.ctrl() {
+                data.retain(|c| {
+                    if (c.pos - ev.pos).hypot() > RADIUS {
+                        true
+                    } else {
+                        ctx.request_paint_rect(kurbo::Circle::new(c.pos, RADIUS).bounding_box());
+                        false
+                    }
+                });
             } else {
                 // Move the circle to a new location, invalidating the old locations. The new location
                 // will be invalidated during AnimFrame.

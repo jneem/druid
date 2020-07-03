@@ -19,7 +19,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
-use crate::kurbo::{Rect, Size};
+use crate::kurbo::Size;
 use crate::piet::Piet;
 use crate::shell::{Application, IdleToken, MouseEvent, Region, Scale, WinHandler, WindowHandle};
 
