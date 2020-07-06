@@ -395,7 +395,7 @@ impl<T: Data, W: Widget<T>> WidgetPod<T, W> {
         }
 
         ctx.z_ops.append(&mut inner_ctx.z_ops);
-        self.state.invalid = Region::EMPTY;
+        self.state.invalid.clear();
     }
 
     /// Paint the widget, translating it by the origin of its layout rectangle.
@@ -913,14 +913,17 @@ impl WidgetState {
     ///
     /// This method is idempotent and can be called multiple times.
     fn merge_up(&mut self, child_state: &mut WidgetState) {
-        let mut child_region = std::mem::replace(&mut child_state.invalid, Region::EMPTY);
-        child_region += child_state.layout_rect().origin().to_vec2() - child_state.viewport_offset;
         let clip = self
             .layout_rect()
             .with_origin(Point::ORIGIN)
             .inset(self.paint_insets);
-        child_region.intersect_with(clip);
-        self.invalid.merge_with(child_region);
+        let offset = child_state.layout_rect().origin().to_vec2() - child_state.viewport_offset;
+        for &r in child_state.invalid.rects() {
+            let r = (r + offset).intersect(clip);
+            if r.area() != 0.0 {
+                self.invalid.add_rect(r);
+            }
+        }
 
         self.needs_layout |= child_state.needs_layout;
         self.request_anim |= child_state.request_anim;
