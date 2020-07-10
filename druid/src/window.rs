@@ -45,6 +45,7 @@ pub struct Window<T> {
     pub(crate) root: WidgetPod<T, Box<dyn Widget<T>>>,
     pub(crate) title: LabelText<T>,
     size: Size,
+    invalid: Region,
     pub(crate) menu: Option<MenuDesc<T>>,
     pub(crate) context_menu: Option<MenuDesc<T>>,
     pub(crate) last_anim: Option<Instant>,
@@ -61,6 +62,7 @@ impl<T> Window<T> {
             id,
             root: WidgetPod::new(desc.root),
             size: Size::ZERO,
+            invalid: Region::EMPTY,
             title: desc.title,
             menu: desc.menu,
             context_menu: None,
@@ -147,6 +149,7 @@ impl<T: Data> Window<T> {
         if self.wants_animation_frame() {
             self.handle.request_anim_frame();
         }
+        self.invalid.merge_with(&widget_state.invalid);
 
         // If there are any commands and they should be processed
         if process_commands && !queue.is_empty() {
@@ -203,7 +206,7 @@ impl<T: Data> Window<T> {
             );
         }
 
-        let mut widget_state = WidgetState::new(self.root.id());
+        let mut widget_state = WidgetState::new(self.root.id(), Some(self.size));
         let is_handled = {
             let mut state = ContextState::new::<T>(queue, &self.handle, self.id, self.focus);
             let mut ctx = EventCtx {
@@ -267,7 +270,7 @@ impl<T: Data> Window<T> {
             None
         };
 
-        let mut widget_state = WidgetState::new(self.root.id());
+        let mut widget_state = WidgetState::new(self.root.id(), Some(self.size));
         let mut state = ContextState::new::<T>(queue, &self.handle, self.id, self.focus);
         let mut ctx = LifeCycleCtx {
             state: &mut state,
@@ -286,7 +289,7 @@ impl<T: Data> Window<T> {
     pub(crate) fn update(&mut self, queue: &mut CommandQueue, data: &T, env: &Env) {
         self.update_title(data, env);
 
-        let mut widget_state = WidgetState::new(self.root.id());
+        let mut widget_state = WidgetState::new(self.root.id(), Some(self.size));
         let mut state = ContextState::new::<T>(queue, &self.handle, self.id, self.focus);
         let mut update_ctx = UpdateCtx {
             widget_state: &mut widget_state,
@@ -301,9 +304,10 @@ impl<T: Data> Window<T> {
         if self.root.state().needs_layout {
             self.handle.invalidate();
         } else {
-            for rect in self.root.state().invalid.rects() {
+            for rect in self.invalid.rects() {
                 self.handle.invalidate_rect(*rect);
             }
+            self.invalid.clear();
         }
     }
 
@@ -333,7 +337,7 @@ impl<T: Data> Window<T> {
     }
 
     fn layout(&mut self, queue: &mut CommandQueue, data: &T, env: &Env) {
-        let mut widget_state = WidgetState::new(self.root.id());
+        let mut widget_state = WidgetState::new(self.root.id(), Some(self.size));
         let mut state = ContextState::new::<T>(queue, &self.handle, self.id, self.focus);
         let mut layout_ctx = LayoutCtx {
             state: &mut state,
@@ -372,7 +376,7 @@ impl<T: Data> Window<T> {
         let focus = self.focus;
         let Window { root, handle, .. } = self;
 
-        let widget_state = WidgetState::new(root.id());
+        let widget_state = WidgetState::new(root.id(), Some(self.size));
         let mut state = ContextState::new::<T>(queue, handle, id, focus);
         let mut ctx = PaintCtx {
             render_ctx: piet,

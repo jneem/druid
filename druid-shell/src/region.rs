@@ -69,13 +69,8 @@ impl Region {
     }
 
     /// Modifies this region by including everything in the other region.
-    pub fn merge_with(&mut self, other: Region) {
-        if self.is_empty() {
-            // Reuse the allocation if we can.
-            self.rects = other.rects;
-        } else {
-            self.rects.extend_from_slice(&other.rects);
-        }
+    pub fn merge_with(&mut self, other: &Region) {
+        self.rects.extend_from_slice(&other.rects);
     }
 
     /// Modifies this region by intersecting it with the given rectangle.

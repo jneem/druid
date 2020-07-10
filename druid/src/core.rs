@@ -136,7 +136,7 @@ impl<T, W: Widget<T>> WidgetPod<T, W> {
     /// so it can participate in layout and event flow. The process of
     /// adding a child widget to a container should call this method.
     pub fn new(inner: W) -> WidgetPod<T, W> {
-        let mut state = WidgetState::new(inner.id().unwrap_or_else(WidgetId::next));
+        let mut state = WidgetState::new(inner.id().unwrap_or_else(WidgetId::next), None);
         state.children_changed = true;
         state.needs_layout = true;
         WidgetPod {
@@ -395,7 +395,6 @@ impl<T: Data, W: Widget<T>> WidgetPod<T, W> {
         }
 
         ctx.z_ops.append(&mut inner_ctx.z_ops);
-        self.state.invalid.clear();
     }
 
     /// Paint the widget, translating it by the origin of its layout rectangle.
@@ -882,10 +881,10 @@ impl<T, W: Widget<T> + 'static> WidgetPod<T, W> {
 }
 
 impl WidgetState {
-    pub(crate) fn new(id: WidgetId) -> WidgetState {
+    pub(crate) fn new(id: WidgetId, size: Option<Size>) -> WidgetState {
         WidgetState {
             id,
-            layout_rect: None,
+            layout_rect: size.map(|s| s.to_rect()),
             paint_insets: Insets::ZERO,
             invalid: Region::EMPTY,
             viewport_offset: Vec2::ZERO,
@@ -924,6 +923,11 @@ impl WidgetState {
                 self.invalid.add_rect(r);
             }
         }
+        // Clearing the invalid rects here is less fragile than doing it while painting. The
+        // problem is that widgets (for example, Either) might choose not to paint certain
+        // invisible children, and we shouldn't allow these invisible children to accumulate
+        // invalid rects.
+        child_state.invalid.clear();
 
         self.needs_layout |= child_state.needs_layout;
         self.request_anim |= child_state.request_anim;
@@ -979,7 +983,7 @@ mod tests {
         let mut widget = WidgetPod::new(widget).boxed();
 
         let mut command_queue: CommandQueue = VecDeque::new();
-        let mut widget_state = WidgetState::new(WidgetId::next());
+        let mut widget_state = WidgetState::new(WidgetId::next(), None);
         let mut state = ContextState {
             command_queue: &mut command_queue,
             window_id: WindowId::next(),
