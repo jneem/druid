@@ -19,7 +19,7 @@ x11 = ["x11rb", "cairo-sys-rs"]
 [dependencies]
 # NOTE: When changing the piet or kurbo versions, ensure that
 #       the kurbo version included in piet is compatible with the kurbo version specified here.
-piet-common = "0.1.1"
+piet-common = { git = "https://github.com/linebender/piet.git" }
 kurbo = "0.6.1"
 
 log = "0.4.8"
@@ -78,5 +78,5 @@ version = "0.3.40"
 features = ["Window", "MouseEvent", "CssStyleDeclaration", "WheelEvent", "KeyEvent", "KeyboardEvent"]
 
 [dev-dependencies]
-piet-common = { version = "0.1.1", features = ["png"] }
+piet-common = { git = "https://github.com/linebender/piet.git", features = ["png"] }
 simple_logger = { version = "1.6.0", default-features = false }
