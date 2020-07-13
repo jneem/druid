@@ -344,7 +344,7 @@ impl WindowBuilder {
                             // invalidated by external forces).
                             let alloc = widget.get_allocation();
                             context.set_source_surface(&surface, 0.0, 0.0);
-                            context.rectangle(alloc.x as f64, alloc.y as f64, alloc.width as f64, alloc.height as f64);
+                            context.rectangle(0.0, 0.0, alloc.width as f64, alloc.height as f64);
                             context.fill();
 
                             invalid.clear();
