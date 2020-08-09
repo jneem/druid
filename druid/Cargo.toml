@@ -49,7 +49,7 @@ console_log = "0.2.0"
 [dev-dependencies]
 float-cmp = { version = "0.8.0", features = ["std"], default-features = false }
 tempfile = "3.1.0"
-piet-common = { git = "https://github.com/linebender/piet.git", features = ["png"] }
+piet-common = { git = "https://github.com/linebender/piet.git", rev = "7fea63a1970970", features = ["png"] }
 
 [[example]]
 name = "image"
